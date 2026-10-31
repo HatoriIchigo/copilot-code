@@ -85,12 +85,14 @@ Copilot は、返答の最終行に `Action: ツール名(引数)` を 1 行だ�
 | `-MaxOutputChars` | `50000` | ツール 1 回の出力の上限（文字） |
 | `-CellPreviewChars` | `1000` | `Observation:` セルに書く上限（文字） |
 | `-ReadOnly` | オフ | `Write` / `Update` / `Shell` を無効にする |
+| `-BringToFront` | オフ | 送信のたびに Excel を前面に出してフォーカスを移す（既定では前面に出さない） |
 | `-Test` | オフ | 自動テストを実行する |
 | `-TimeoutSec` | `900` | `-Test` 全体の制限時間（秒） |
 
 ## しくみ
 
 - ペインを開く: UI Automation でリボンの `Copilot Chat` ボタンを押す。ペインは、クラス名 `MsoWorkPane` かつ名前 `Copilot` の要素で判定する
+- 非アクティブでの動作: Excel を前面に出さずに動く。セルの操作は COM、入力と送信は CDP なので OS のフォーカスを使わない。ページには `Emulation.setFocusEmulationEnabled` で「フォーカスあり」と見せ、WebView2 の起動引数でバックグラウンドの描画抑制を切っている。ペインを開く操作だけは Excel が一瞬前面に出るため、起動直後（Excel が自分で前面に出るとき）に済ませる。ウィンドウを最小化した状態は未対応（UI Automation で要素が取れなくなる恐れがある）
 - 入力と送信、回答の取得: ペインの中身は WebView2 で UI Automation からは見えないため、Excel を `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--remote-debugging-port=<Port> --force-renderer-accessibility"` つきで起動し、CDP（Chrome DevTools Protocol）の WebSocket で DOM を操作する
 - 改行: Enter は送信になるため、行の区切りは Shift+Enter で入力する
 - セルの検知: 起動した Excel に `BindToMoniker` で接続し、500 ms ごとにポーリングする。Excel が操作を拒否したときは 30 秒までリトライする
@@ -119,4 +121,5 @@ powershell -File ./copilot.ps1 -Test -Port 9333
 - Copilot の「データの分析」などの紹介ポップアップが出ると、Excel のウィンドウが操作できなくなり、検出に失敗します。出たら手動で閉じてください。
 - 通常起動の Excel と WebView2 のプロファイルを共有する場合の動作は、確認していません。
 - 巨大ファイルの読み込みは、`Read` のページング（`-MaxOutputChars` ごと）に頼っています。
+- 最小化した Excel では動作を確認していません。非アクティブ（他のウィンドウが前面）では、送信と回答の取得ができることを確認済みです。
 - 自動テストのうち、`Shell` のラウンドは Copilot のクレジット切れで実機確認できていません（単体では確認済み）。

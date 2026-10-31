@@ -7,7 +7,8 @@
     [int]$CellPreviewChars = 1000,  # Observation: セルに書く上限。超えた分は Copilot へ送るだけでシートには載せない
     [switch]$ReadOnly,              # 指定すると Write / Update を無効にする
     [int]$ReplyTimeoutSec = 300,
-    [int]$ShellTimeoutSec = 300     # Shell ツール1回の実行時間の上限
+    [int]$ShellTimeoutSec = 300,    # Shell ツール1回の実行時間の上限
+    [switch]$BringToFront           # 指定すると、送信のたびに Excel を前面に出してフォーカスを移す
 )
 
 $ErrorActionPreference = 'Stop'
@@ -156,7 +157,8 @@ function Show-CopilotPane($win) {
     }
     $main = [IntPtr]$win.Current.NativeWindowHandle
     $webView = Wait-Until { $h = [CopilotWin]::FindChild($main, 'Chrome_WidgetWin_0'); if ($h -ne [IntPtr]::Zero) { $h } } 15
-    if ($webView) { [CopilotWin]::Focus($main, $webView) }
+    # 既定では Excel を前面に出さない (他の作業を邪魔しない)。入力は CDP で直接届ける
+    if ($webView -and $BringToFront) { [CopilotWin]::Focus($main, $webView) }
 }
 
 # C2 の文字列を Copilot に送り、回答テキストを返す
@@ -174,6 +176,8 @@ function Ask-Copilot($win, [string]$text) {
     if (-not $ws) { throw "Copilot pane (CDP) not reachable. $script:cdpError" }
     try {
         $before = [int](Invoke-CdpEval $ws $jsReplyCount)
+        # ウィンドウが非アクティブでも、ページを「フォーカスあり」として扱わせる
+        Invoke-Cdp $ws 'Emulation.setFocusEmulationEnabled' @{ enabled = $true } | Out-Null
         Invoke-CdpEval $ws "($($jsInput.Trim())).focus()" | Out-Null
         # 入力欄は Enter で送信されるため、改行は Shift+Enter で入れる
         $lines = $text -split "\r?\n"
@@ -603,7 +607,7 @@ $defaultMaxOutputChars = $MaxOutputChars
 $BackupRoot = if ($Test) { Join-Path $workDir 'backup' } else { Join-Path $env:LOCALAPPDATA 'copilot-code\backup' }
 
 # WebView2 の DevTools ポートと a11y を有効にして、新しい Excel インスタンスで開く
-$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port --force-renderer-accessibility"
+$env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "--remote-debugging-port=$Port --force-renderer-accessibility --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --disable-background-timer-throttling"
 Start-Process excel.exe -ArgumentList '/x', "`"$copy`""
 Write-Log "Opened copy: $copy"
 
@@ -630,6 +634,13 @@ try {
         Set-Cell $sheet $inputRow 2 'USER:'
     }
     Write-Log "Attached. Directory: $launchDir. Watching C$inputRow."
+
+    # ペインは起動時に開いておく。開く操作で Excel が一瞬前面に出るので、
+    # Excel が自分で前面に出る起動直後のうちに済ませ、送信時に他の作業を邪魔しないようにする
+    try {
+        $w = Wait-Until { Get-ExcelWindow $title } 30
+        if ($w) { Show-CopilotPane $w; Write-Log 'Copilot pane ready.' }
+    } catch { Write-Log "WARN: could not open the Copilot pane at startup: $($_.Exception.Message)" }
 
     $last = [string]$sheet.Cells($inputRow, 3).Value2
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
