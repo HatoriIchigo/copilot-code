@@ -9,7 +9,8 @@
     [int]$ReplyTimeoutSec = 300,
     [int]$ShellTimeoutSec = 300,    # Shell ツール1回の実行時間の上限
     [switch]$BringToFront,          # 指定すると、送信のたびに Excel を前面に出してフォーカスを移す
-    [string]$SessionRoot = (Join-Path $env:LOCALAPPDATA 'copilot-code\sessions')  # 作業用コピー (自動保存される) の置き場所
+    [switch]$NoLock,                # 指定すると、処理中でもシートを入力不可にしない
+    [string]$SessionRoot =(Join-Path $env:LOCALAPPDATA 'copilot-code\sessions')  # 作業用コピー (自動保存される) の置き場所
 )
 
 $ErrorActionPreference = 'Stop'
@@ -580,6 +581,7 @@ function Invoke-Turn($wb, $sheet, [string]$title, [int]$inputRow, [string]$userT
     }
     $row++
     Set-Cell $sheet $row 2 'USER:'
+    Set-InputLock $sheet "入力できます (C$row に入力して Enter)" $row
     Save-Book $wb
     $row
 }
@@ -601,6 +603,28 @@ function Save-Book($wb) {
         catch [System.Runtime.InteropServices.COMException] { Start-Sleep -Milliseconds 500 }
     }
     Write-Log 'WARN: could not save the workbook.'
+}
+
+# チャットシートの入力可否を切り替え、1 行目に状態を表示する。
+# openRow が 0 のときは、全セルを入力不可にする (処理中)。1 以上のときは、その行の C 列だけ入力できる (待機中)。
+# パスワードなしのシート保護 (UserInterfaceOnly) なので、このスクリプトからの書き込みは止まらない
+function Set-InputLock($sheet, [string]$message, [int]$openRow = 0) {
+    if ($NoLock) { return }
+    $ready = $openRow -gt 0
+    for ($i = 0; $i -lt 20; $i++) {
+        try {
+            $sheet.Unprotect()
+            $sheet.Cells.Locked = $true
+            if ($ready) { $sheet.Cells($openRow, 3).Locked = $false }
+            $sheet.Cells(1, 2).Value2 = '状態:'
+            $sheet.Cells(1, 3).Value2 = $message
+            # 緑: 入力できる / 橙: 処理中 (BGR)
+            $sheet.Range('B1:C1').Interior.Color = $(if ($ready) { 13561798 } else { 10284031 })
+            $sheet.Protect([Reflection.Missing]::Value, $true, $true, $true, $true)
+            return
+        } catch [System.Runtime.InteropServices.COMException] { Start-Sleep -Milliseconds 500 }
+    }
+    Write-Log 'WARN: could not change the input lock.'
 }
 
 # --- main ---
@@ -661,6 +685,7 @@ try {
         Set-Cell $sheet $inputRow 2 'USER:'
     }
     Write-Log "Attached. Directory: $launchDir. Watching C$inputRow."
+    Set-InputLock $sheet '初期化中です。しばらくお待ちください…'
     # 起動時の送信中に入力されたものも拾えるよう、「前回の値」は送信の前に読んでおく
     $last = [string]$sheet.Cells($inputRow, 3).Value2
 
@@ -682,6 +707,7 @@ try {
         if ($Test) { throw }
         Write-Log "WARN: could not send the startup prompt: $($_.Exception.Message)"
     }
+    Set-InputLock $sheet "入力できます (C$inputRow に入力して Enter)" $inputRow
 
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $injectedRow = 0
@@ -736,6 +762,7 @@ try {
                 $last = $cur
                 Write-Log "C$inputRow changed: $cur"
                 $startRow = $inputRow
+                Set-InputLock $sheet 'Copilot の応答を待っています…'
                 Save-Book $wb   # 入力を検知した時点で保存する
                 $inputRow = @(Invoke-Turn $wb $sheet $title $inputRow $cur)[-1]
                 $last = ''
