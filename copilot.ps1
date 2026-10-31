@@ -8,7 +8,8 @@
     [switch]$ReadOnly,              # 指定すると Write / Update を無効にする
     [int]$ReplyTimeoutSec = 300,
     [int]$ShellTimeoutSec = 300,    # Shell ツール1回の実行時間の上限
-    [switch]$BringToFront           # 指定すると、送信のたびに Excel を前面に出してフォーカスを移す
+    [switch]$BringToFront,          # 指定すると、送信のたびに Excel を前面に出してフォーカスを移す
+    [string]$SessionRoot = (Join-Path $env:LOCALAPPDATA 'copilot-code\sessions')  # 作業用コピー (自動保存される) の置き場所
 )
 
 $ErrorActionPreference = 'Stop'
@@ -543,6 +544,7 @@ function Invoke-Turn($wb, $sheet, [string]$title, [int]$inputRow, [string]$userT
             $row++
             Set-Cell $sheet $row 2 'Result:'
             Set-Cell $sheet $row 3 (Protect-Formula (Limit-Text $answer 30000))
+            Save-Book $wb
             # Action は、コードブロックを除いた本文の末尾から探す。Write / Update の内容は最後のコードブロック
             $action = Get-Action $reply.Prose
             if (-not $action) { break }
@@ -565,6 +567,7 @@ function Invoke-Turn($wb, $sheet, [string]$title, [int]$inputRow, [string]$userT
             $row++
             Set-Cell $sheet $row 2 'Observation:'
             Set-Cell $sheet $row 3 (Protect-Formula $preview)
+            Save-Book $wb
             $prompt = Build-Followup $wb $call $obs
         }
     } catch {
@@ -577,6 +580,7 @@ function Invoke-Turn($wb, $sheet, [string]$title, [int]$inputRow, [string]$userT
     }
     $row++
     Set-Cell $sheet $row 2 'USER:'
+    Save-Book $wb
     $row
 }
 
@@ -589,6 +593,16 @@ function Set-Cell($sheet, [int]$row, [int]$col, [string]$value) {
     throw "Could not write cell ($row, $col)."
 }
 
+# ブックを上書き保存する (COM の Save。キー操作ではないので Excel が非アクティブでも動く)。
+# セルの編集中などで拒否されたら少し待って再試行し、それでも保存できなければ警告だけ出して続ける
+function Save-Book($wb) {
+    for ($i = 0; $i -lt 20; $i++) {
+        try { $wb.Save(); return }
+        catch [System.Runtime.InteropServices.COMException] { Start-Sleep -Milliseconds 500 }
+    }
+    Write-Log 'WARN: could not save the workbook.'
+}
+
 # --- main ---
 
 $launchDir = (Get-Location).ProviderPath
@@ -598,8 +612,10 @@ if (-not (Test-Path $master)) {
     exit 1
 }
 
-# マスタは触らず、コピーを開く
-$workDir = Join-Path $env:TEMP ('copilot-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+# マスタは触らず、コピーを開く。通常はコピーを残す (自動保存されるので、後から会話を見返せる)。
+# テストのときだけ一時フォルダに作って、終わったら消す
+$workDir = if ($Test) { Join-Path $env:TEMP ('copilot-' + [guid]::NewGuid().ToString('N').Substring(0, 8)) }
+           else { Join-Path $SessionRoot ((Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + [guid]::NewGuid().ToString('N').Substring(0, 4)) }
 New-Item -ItemType Directory $workDir | Out-Null
 $copy = Join-Path $workDir 'copilot.xlsx'
 Copy-Item $master $copy
@@ -720,6 +736,7 @@ try {
                 $last = $cur
                 Write-Log "C$inputRow changed: $cur"
                 $startRow = $inputRow
+                Save-Book $wb   # 入力を検知した時点で保存する
                 $inputRow = @(Invoke-Turn $wb $sheet $title $inputRow $cur)[-1]
                 $last = ''
                 Write-Log "Watching C$inputRow."
@@ -774,7 +791,7 @@ try {
         try { $app.DisplayAlerts = $false; $app.Quit() } catch { }
         Start-Sleep 2
     }
-    if ($Test -or -not $wb) {
+    if ($Test) {
         Remove-Item $workDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }
