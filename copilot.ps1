@@ -8,8 +8,7 @@
     [switch]$ReadOnly,              # 指定すると Write / Update を無効にする
     [int]$ReplyTimeoutSec = 300,
     [int]$ShellTimeoutSec = 300,    # Shell ツール1回の実行時間の上限
-    [switch]$BringToFront,          # 指定すると、送信のたびに Excel を前面に出してフォーカスを移す
-    [int]$PreambleEvery = 20        # ツールの説明つきの長いプロンプトを送り直す間隔 (ユーザ入力の回数)
+    [switch]$BringToFront           # 指定すると、送信のたびに Excel を前面に出してフォーカスを移す
 )
 
 $ErrorActionPreference = 'Stop'
@@ -95,11 +94,6 @@ document.querySelector('[aria-label="チャット入力"]')
 $jsReplyCount = @'
 document.querySelectorAll('.fai-CopilotMessage__content').length
 '@
-$jsUserCount = @'
-document.querySelectorAll('.fai-UserMessage__message').length
-'@
-# 長いプロンプト (ツールの説明つき) を最後に送ってから数えたユーザ入力の回数。起動直後は必ず長いほうを送る
-$script:turnsSinceFull = $PreambleEvery
 $jsGenerating = @'
 !!Array.from(document.querySelectorAll('button')).find(b => b.getAttribute('aria-label') === 'Stop')
 '@
@@ -168,9 +162,7 @@ function Show-CopilotPane($win) {
 }
 
 # C2 の文字列を Copilot に送り、回答テキストを返す
-# $short があるときは、チャットが空 (新しいチャット) か、前回の長いプロンプトから $PreambleEvery 回たったときだけ
-# $text (長いほう) を送り、それ以外は $short を送る。$short が無ければ常に $text
-function Ask-Copilot($win, [string]$text, $short = $null) {
+function Ask-Copilot($win, [string]$text) {
     Show-CopilotPane $win
     # ペインが開いて入力欄が描画されるまで待つ
     $ws = Wait-Until {
@@ -184,17 +176,6 @@ function Ask-Copilot($win, [string]$text, $short = $null) {
     if (-not $ws) { throw "Copilot pane (CDP) not reachable. $script:cdpError" }
     try {
         $before = [int](Invoke-CdpEval $ws $jsReplyCount)
-        if ($null -ne $short) {
-            $users = [int](Invoke-CdpEval $ws $jsUserCount)
-            if ($users -eq 0 -or $script:turnsSinceFull -ge $PreambleEvery) {
-                $script:turnsSinceFull = 1
-                Write-Log 'Prompt: full (tool instructions included)'
-            } else {
-                $text = [string]$short
-                $script:turnsSinceFull++
-                Write-Log "Prompt: short ($script:turnsSinceFull / $PreambleEvery)"
-            }
-        }
         # ウィンドウが非アクティブでも、ページを「フォーカスあり」として扱わせる
         Invoke-Cdp $ws 'Emulation.setFocusEmulationEnabled' @{ enabled = $true } | Out-Null
         Invoke-CdpEval $ws "($($jsInput.Trim())).focus()" | Out-Null
@@ -243,15 +224,23 @@ function Expand-Template([string]$template, $pairs) {
 }
 
 # プロンプトシートのテンプレートに、設定シートとチャットシートの値を埋め込む
-function Build-Prompt($wb, [string]$userText, [switch]$Short) {
-    # 2回目以降用 (B4) が空なら $null を返し、常に初回用 (B2) を送る
-    $cell = if ($Short) { 'B4' } else { 'B2' }
-    $template = [string]$wb.Worksheets.Item('プロンプト').Range($cell).Value2
-    if ($Short -and $template.Trim() -eq '') { return $null }
+# 起動時に1回だけ送るプロンプト（プロンプトシートの B2）。ツールの使い方や注意事項など
+function Build-Startup($wb) {
+    $template = [string]$wb.Worksheets.Item('プロンプト').Range('B2').Value2
+    $directory = [string]$wb.Worksheets.Item('設定').Range('C2').Value2
+    Expand-Template $template @(
+        @('__SUMMARY__', ''),   # 要約は未対応なので空で埋める
+        @('%DIRECTORY%', $directory),
+        @('__PROMPT__', ''))
+}
+
+# ユーザの入力ごとに送るプロンプト（プロンプトシートの B4）。B4 が空ならユーザの入力をそのまま送る
+function Build-Prompt($wb, [string]$userText) {
+    $template = [string]$wb.Worksheets.Item('プロンプト').Range('B4').Value2
+    if ($template.Trim() -eq '') { return $userText }
     $directory = [string]$wb.Worksheets.Item('設定').Range('C2').Value2
     # ユーザ入力は最後に埋め込み、その中の文字列が再置換されないようにする
     Expand-Template $template @(
-        @('__SUMMARY__', ''),   # 要約は未対応なので空で埋める
         @('%DIRECTORY%', $directory),
         @('__PROMPT__', $userText))
 }
@@ -546,13 +535,9 @@ function Invoke-Turn($wb, $sheet, [string]$title, [int]$inputRow, [string]$userT
     $row = $inputRow
     try {
         $prompt = Build-Prompt $wb $userText
-        $short = Build-Prompt $wb $userText -Short
-        foreach ($p in $prompt, $short) {
-            if ($Test -and $p -and $p -match '__(PROMPT|SUMMARY)__|%DIRECTORY%') { throw "Unreplaced placeholder in prompt: $p" }
-        }
+        if ($Test -and $prompt -match '__(PROMPT|SUMMARY)__|%DIRECTORY%') { throw "Unreplaced placeholder in prompt: $prompt" }
         for ($step = 1; ; $step++) {
-            $reply = @(Ask-Copilot (Get-ExcelWindow $title) $prompt $short)[-1]
-            $short = $null   # 短いプロンプトの候補は、ユーザ入力の最初の送信だけ。ツール結果の返信には使わない
+            $reply = @(Ask-Copilot (Get-ExcelWindow $title) $prompt)[-1]
             $answer = $reply.Text
             Write-Log "Reply: $answer"
             $row++
@@ -660,6 +645,8 @@ try {
         Set-Cell $sheet $inputRow 2 'USER:'
     }
     Write-Log "Attached. Directory: $launchDir. Watching C$inputRow."
+    # 起動時の送信中に入力されたものも拾えるよう、「前回の値」は送信の前に読んでおく
+    $last = [string]$sheet.Cells($inputRow, 3).Value2
 
     # ペインは起動時に開いておく。開く操作で Excel が一瞬前面に出るので、
     # Excel が自分で前面に出る起動直後のうちに済ませ、送信時に他の作業を邪魔しないようにする
@@ -668,7 +655,18 @@ try {
         if ($w) { Show-CopilotPane $w; Write-Log 'Copilot pane ready.' }
     } catch { Write-Log "WARN: could not open the Copilot pane at startup: $($_.Exception.Message)" }
 
-    $last = [string]$sheet.Cells($inputRow, 3).Value2
+    # ツールの使い方などは、起動時にここで1回だけ送る。以降はユーザの入力だけを送る
+    try {
+        $startup = Build-Startup $wb
+        if ($Test -and $startup -match '__(PROMPT|SUMMARY)__|%DIRECTORY%') { throw "Unreplaced placeholder in startup prompt: $startup" }
+        $w = Wait-Until { Get-ExcelWindow $title } 30
+        $r = @(Ask-Copilot $w $startup)[-1]
+        Write-Log "Startup prompt sent. Reply: $($r.Text)"
+    } catch {
+        if ($Test) { throw }
+        Write-Log "WARN: could not send the startup prompt: $($_.Exception.Message)"
+    }
+
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     $injectedRow = 0
     $testIdx = 0
