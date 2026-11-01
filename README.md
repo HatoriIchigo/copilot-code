@@ -9,12 +9,32 @@ Excel の Copilot チャットペインを、ブックのセルから操作す�
 | --- | --- |
 | `copilot.ps1` | 本体。Windows PowerShell 5.1 で動く |
 | `copilot.xlsx` | マスタのブック。起動のたびにコピーして使い、マスタは書き換えない |
+| `setup.ps1` | インストールと環境変数の登録 |
 
 ## 動作環境
 
 - Windows 11 / Windows PowerShell 5.1（`pwsh` は不要）
 - デスクトップ版 Excel（Copilot チャットが使える Microsoft 365）
 - Copilot の利用枠（月ごとのクレジットが尽きると「今月はクレジットが不足しています」と返り、動かなくなる）
+
+## インストール
+
+```powershell
+powershell -File ./setup.ps1
+```
+
+次のことを行います（管理者権限は不要）。何度実行しても結果は同じです。
+
+1. `copilot.ps1` と `copilot.xlsx` を `~/.copilot-code`（`%USERPROFILE%\.copilot-code`）にコピーする。既存の `copilot.xlsx` と内容が違うときは、`copilot.xlsx.bak` に退避してから上書きする
+2. 起動用の `copilot-code.cmd` を作る
+3. ユーザー環境変数 `COPILOT_CODE_HOME` にインストール先を登録し、`Path` に追加する
+
+新しく開いたターミナルで、作業したいディレクトリに移動して `copilot-code` と入力すると起動します。`copilot-code -ReadOnly` のように、パラメータもそのまま渡せます。
+
+| オプション | 内容 |
+| --- | --- |
+| `-InstallDir` | インストール先を変える（既定 `~/.copilot-code`） |
+| `-Uninstall` | インストール先を削除し、環境変数と `Path` の追加分を元に戻す。`%LOCALAPPDATA%\copilot-code` の作業用コピーは残る |
 
 ## 使い方
 
